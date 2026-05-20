@@ -1,0 +1,66 @@
+server:
+  port: ${SERVER_PORT:8080}
+  forward-headers-strategy: none
+  servlet:
+    context-path: /api
+
+spring:
+  application:
+    name: api-billing-backend
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:nanfeng_api_billing}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=${DB_SSL:false}&allowPublicKeyRetrieval=true
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:123456}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: ${REDIS_DATABASE:0}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2s
+  jackson:
+    time-zone: Asia/Shanghai
+    date-format: yyyy-MM-dd HH:mm:ss
+    deserialization:
+      fail-on-unknown-properties: true
+  servlet:
+    multipart:
+      max-file-size: 2MB
+      max-request-size: 3MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+
+security:
+  jwt:
+    issuer: nanfeng-api-billing
+    secret: ${JWT_SECRET:vzgDpnZnxgU6sx4ypTg/vm01xEKWXbde0M1gVJacIu2JaGaW9biM9XbaWuDSZDsPTsfTsBkBTb8uF/wrsFh/sg==}
+    access-token-minutes: 30
+    refresh-token-days: 7
+    # 生产环境部署在 HTTPS 下时必须设为 true
+    cookie-secure: ${JWT_COOKIE_SECURE:false}
+  cors:
+    allowed-origins:
+      - http://localhost:5555
+      - http://127.0.0.1:5555
+      - https://api.nfiii.com
+  client-ip:
+    trusted-proxies:
+      - 127.0.0.1
+      - '::1'
+
+# IP 归属地查询 — 通过 Bilibili 公共接口按 IP 获取
+ip-geo:
+  bilibili:
+    lookup-url: ${IP_GEO_BILIBILI_LOOKUP_URL:https://api.live.bilibili.com/ip_service/v1/ip_service/get_ip_addr}
+    current-url: ${IP_GEO_BILIBILI_CURRENT_URL:https://app.bilibili.com/x/resource/ip}
+
+home:
+  gateway-province-name: ${HOME_GATEWAY_PROVINCE_NAME:}
+  gateway-ip: ${HOME_GATEWAY_IP:}
+  gateway-host: ${HOME_GATEWAY_HOST:}
+  gateway-use-local-interface-fallback: ${HOME_GATEWAY_USE_LOCAL_INTERFACE_FALLBACK:false}
