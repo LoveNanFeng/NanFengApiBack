@@ -20,6 +20,7 @@ DROP TABLE IF EXISTS `sys_friend_link`;
 DROP TABLE IF EXISTS `sys_friend_link_config`;
 DROP TABLE IF EXISTS `sys_payment_recharge_order`;
 DROP TABLE IF EXISTS `sys_payment_recharge_amount`;
+DROP TABLE IF EXISTS `sys_payment_wechat_config`;
 DROP TABLE IF EXISTS `sys_payment_alipay_config`;
 DROP TABLE IF EXISTS `sys_user_package_interface`;
 DROP TABLE IF EXISTS `sys_user_package_global`;
@@ -284,6 +285,25 @@ CREATE TABLE `sys_payment_alipay_config` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='支付宝支付配置表';
 
+CREATE TABLE `sys_payment_wechat_config` (
+  `id` tinyint NOT NULL COMMENT '配置编号',
+  `enabled` tinyint NOT NULL DEFAULT 0 COMMENT '是否启用微信支付：1启用，0禁用',
+  `app_id` varchar(64) DEFAULT NULL COMMENT '微信支付绑定的AppID',
+  `mch_id` varchar(32) DEFAULT NULL COMMENT '微信支付商户号',
+  `api_v3_key` varchar(64) DEFAULT NULL COMMENT '微信支付APIv3密钥',
+  `merchant_serial_no` varchar(128) DEFAULT NULL COMMENT '商户API证书序列号',
+  `merchant_private_key` text COMMENT '商户API证书私钥',
+  `wechatpay_public_key_id` varchar(128) DEFAULT NULL COMMENT '微信支付平台公钥ID或平台证书序列号',
+  `wechatpay_public_key` text COMMENT '微信支付平台公钥，用于回调验签',
+  `notify_url` varchar(512) DEFAULT NULL COMMENT '异步通知地址',
+  `native_pay_enabled` tinyint NOT NULL DEFAULT 1 COMMENT '是否启用Native扫码支付：1启用，0禁用',
+  `gateway_url` varchar(255) NOT NULL DEFAULT 'https://api.mch.weixin.qq.com' COMMENT '微信支付API网关地址',
+  `remark` varchar(255) DEFAULT NULL COMMENT '备注',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='微信支付配置表';
+
 CREATE TABLE `sys_payment_recharge_amount` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '充值金额配置编号',
   `amount` decimal(12,4) NOT NULL COMMENT '充值支付金额',
@@ -307,17 +327,17 @@ CREATE TABLE `sys_payment_recharge_order` (
   `biz_name` varchar(128) DEFAULT NULL COMMENT '业务名称',
   `amount` decimal(12,4) NOT NULL COMMENT '充值金额',
   `gift_amount` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '充值赠送金额',
-  `pay_channel` varchar(32) NOT NULL DEFAULT 'ALIPAY' COMMENT '支付渠道',
-  `pay_product` varchar(32) NOT NULL COMMENT '支付产品：PAGE电脑网站、WAP手机网站、FACE当面付',
-  `alipay_method` varchar(64) NOT NULL COMMENT '支付宝接口方法',
+  `pay_channel` varchar(32) NOT NULL DEFAULT 'ALIPAY' COMMENT '支付渠道：ALIPAY支付宝、WECHAT微信、BALANCE余额',
+  `pay_product` varchar(32) NOT NULL COMMENT '支付产品：PAGE电脑网站、WAP手机网站、FACE当面付、NATIVE微信扫码',
+  `alipay_method` varchar(64) NOT NULL COMMENT '第三方接口方法',
   `status` varchar(16) NOT NULL DEFAULT 'PENDING' COMMENT '订单状态：PENDING待支付、PAID已支付、FAILED失败、CLOSED关闭',
   `subject` varchar(128) NOT NULL COMMENT '订单标题',
   `body` varchar(255) DEFAULT NULL COMMENT '订单描述',
-  `trade_no` varchar(128) DEFAULT NULL COMMENT '支付宝交易号',
-  `buyer_id` varchar(64) DEFAULT NULL COMMENT '买家支付宝用户号',
-  `qr_code` varchar(1024) DEFAULT NULL COMMENT '当面付二维码内容',
+  `trade_no` varchar(128) DEFAULT NULL COMMENT '第三方交易号',
+  `buyer_id` varchar(64) DEFAULT NULL COMMENT '第三方买家用户标识',
+  `qr_code` varchar(1024) DEFAULT NULL COMMENT '扫码支付二维码内容',
   `client_type` varchar(16) NOT NULL DEFAULT 'AUTO' COMMENT '客户端类型：AUTO、DESKTOP、MOBILE',
-  `notify_payload` mediumtext COMMENT '支付宝通知原始参数',
+  `notify_payload` mediumtext COMMENT '第三方支付通知原始参数',
   `paid_time` datetime DEFAULT NULL COMMENT '支付完成时间',
   `expire_time` datetime NOT NULL COMMENT '订单过期时间',
   `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
@@ -590,6 +610,11 @@ INSERT INTO `sys_payment_alipay_config`
   (`id`, `enabled`, `gateway_url`, `website_pay_enabled`, `wap_pay_enabled`, `face_pay_enabled`, `sign_type`, `charset_name`, `format_type`)
 VALUES
   (1, 0, 'https://openapi.alipay.com/gateway.do', 1, 1, 0, 'RSA2', 'UTF-8', 'JSON');
+
+INSERT INTO `sys_payment_wechat_config`
+  (`id`, `enabled`, `gateway_url`, `native_pay_enabled`)
+VALUES
+  (1, 0, 'https://api.mch.weixin.qq.com', 1);
 
 INSERT INTO `sys_payment_recharge_amount`
   (`id`, `amount`, `gift_amount`, `status`, `sort_no`, `remark`)
