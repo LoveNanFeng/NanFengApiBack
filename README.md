@@ -20,7 +20,7 @@
 
 | 项目 | 仓库地址 | 说明 |
 | --- | --- | --- |
-| 主仓库 | [LoveNanFeng/NanFengAPI](https://github.com/LoveNanFeng/NanFengAPI) | NanFengAPI 项目总仓库，汇总前端、后端和项目说明 |
+| 主仓库 | [LoveNanFeng/NanFengAPI](https://github.com/LoveNanFeng/NanFengAPI) | NanFengAPI 项目主仓库，项目说明和部署文档都在此仓库 |
 | 前端仓库 | [LoveNanFeng/NanFengApiFront](https://github.com/LoveNanFeng/NanFengApiFront) | NanFengAPI 前端项目，主业务应用在 `vben-admin/playground` |
 | 后端仓库 | [LoveNanFeng/NanFengApiBack](https://github.com/LoveNanFeng/NanFengApiBack) | 当前后端项目，提供 `/api` 和 `/open/v1` 服务 |
 
