@@ -347,6 +347,7 @@ CREATE TABLE `sys_payment_recharge_order` (
   KEY `idx_recharge_user` (`user_id`),
   KEY `idx_recharge_order_type` (`order_type`),
   KEY `idx_recharge_status` (`status`),
+  KEY `idx_recharge_status_expire_time` (`status`, `expire_time`),
   KEY `idx_recharge_create_time` (`create_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='账户余额充值订单表';
 
