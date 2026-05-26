@@ -1,5 +1,13 @@
 # NanFengAPI 后端
 
+> **项目仓库地址**
+>
+> 主仓库：[LoveNanFeng/NanFengAPI](https://github.com/LoveNanFeng/NanFengAPI)
+>
+> 前端仓库：[LoveNanFeng/NanFengApiFront](https://github.com/LoveNanFeng/NanFengApiFront)
+>
+> 后端仓库：[LoveNanFeng/NanFengApiBack](https://github.com/LoveNanFeng/NanFengApiBack)
+>
 > **重要：数据库 SQL 文件路径**
 >
 > `src/main/resources/db/schema.sql`
@@ -10,11 +18,21 @@
 
 ## 项目地址
 
-- 后端项目：`NanFengAPI 后端`
-- 前端项目：`NanFengAPI 前端`
-- 默认接口前缀：`/api`
-- 默认服务端口：`8080`
-- 默认本地地址：`http://localhost:8080/api`
+| 项目 | 仓库地址 | 说明 |
+| --- | --- | --- |
+| 主仓库 | [LoveNanFeng/NanFengAPI](https://github.com/LoveNanFeng/NanFengAPI) | NanFengAPI 项目总仓库，汇总前端、后端和项目说明 |
+| 前端仓库 | [LoveNanFeng/NanFengApiFront](https://github.com/LoveNanFeng/NanFengApiFront) | NanFengAPI 前端项目，主业务应用在 `vben-admin/playground` |
+| 后端仓库 | [LoveNanFeng/NanFengApiBack](https://github.com/LoveNanFeng/NanFengApiBack) | 当前后端项目，提供 `/api` 和 `/open/v1` 服务 |
+
+| 配置项 | 默认值 |
+| --- | --- |
+| 后端项目 | `NanFengAPI 后端` |
+| 前端项目 | `NanFengAPI 前端` |
+| 默认接口前缀 | `/api` |
+| 开放接口前缀 | `/api/open/v1` |
+| 默认服务端口 | `8080` |
+| 默认本地地址 | `http://localhost:8080/api` |
+| 数据库 SQL 文件 | `src/main/resources/db/schema.sql` |
 
 ## 技术栈
 
