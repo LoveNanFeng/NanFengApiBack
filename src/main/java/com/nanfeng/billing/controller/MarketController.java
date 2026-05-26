@@ -221,7 +221,7 @@ public class MarketController {
         boolean hasWhitelist = rows.stream().anyMatch(row -> hasIpWhitelist(row.get("ipWhitelist")));
         String ipText = clientIp == null || clientIp.isBlank() ? "当前访问IP" : clientIp;
         if (!hasWhitelist) {
-            return "已检测到密钥，但未配置IP白名单，请先在控制台把 " + ipText + " 加入全站或当前接口密钥白名单";
+            return "已检测到密钥，但暂时无法自动选择可用密钥，请刷新后重试";
         }
         return "已检测到密钥，但 " + ipText + " 不在密钥IP白名单中，请先在控制台添加后再测试";
     }
@@ -232,7 +232,7 @@ public class MarketController {
 
     private boolean isIpWhitelisted(Object whitelistValue, String clientIp) {
         if (!hasIpWhitelist(whitelistValue)) {
-            return false;
+            return true;
         }
         String normalizedClientIp = normalizeIpToken(clientIp);
         if (normalizedClientIp.isBlank() || !isValidIpLiteral(normalizedClientIp)) {

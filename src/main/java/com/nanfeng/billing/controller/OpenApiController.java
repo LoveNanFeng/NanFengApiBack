@@ -48,9 +48,6 @@ import org.springframework.web.bind.annotation.RestController;
 public class OpenApiController {
 
     private static final int MAX_LOG_RESPONSE_BODY_LENGTH = 20_000;
-    private static final String DEFAULT_NO_WHITELIST_RESPONSE = """
-        {"code":403,"message":"当前服务暂不可用"}
-        """.trim();
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -103,9 +100,6 @@ public class OpenApiController {
         normalizeInvokeMethod(method, allowedMethod);
         ClientAttribution attribution = ipAttributionService.resolve(servletRequest);
         assertKeyOwnerActive(api.get("user_status"));
-        if (!hasIpWhitelist(api.get("ip_whitelist"))) {
-            return respondWithoutWhitelist(api, servletRequest, body, attribution, method, allowedMethod);
-        }
         assertKeyIpWhitelist(api.get("ip_whitelist"), attribution.clientIp());
         if (specifiedResponseEnabled(api.get("specified_response_enabled"))) {
             return respondWithSpecifiedResponse(api, servletRequest, body, attribution, method, allowedMethod);
@@ -257,53 +251,6 @@ public class OpenApiController {
         if (intValue(userStatus) != 1) {
             throw new BusinessException(HttpStatus.FORBIDDEN, "用户被封禁，请联系管理员解决");
         }
-    }
-
-    private boolean hasIpWhitelist(Object whitelistValue) {
-        return whitelistValue != null && !String.valueOf(whitelistValue).trim().isBlank();
-    }
-
-    private ResponseEntity<String> respondWithoutWhitelist(
-        Map<String, Object> api,
-        HttpServletRequest servletRequest,
-        String body,
-        ClientAttribution attribution,
-        String method,
-        String allowedMethod
-    ) {
-        Map<String, Object> queryParams = requestParams(servletRequest);
-        String forwardMethod = forwardMethod(method, allowedMethod, body);
-        String requestSnapshot = toJson(Map.of(
-            "method", method,
-            "forwardMethod", forwardMethod,
-            "queryParams", queryParams,
-            "body", body == null ? "" : body
-        ));
-        Long userId = ((Number) api.get("user_id")).longValue();
-        Long interfaceId = ((Number) api.get("id")).longValue();
-        String responseBody = DEFAULT_NO_WHITELIST_RESPONSE;
-        logCall(
-            userId,
-            interfaceId,
-            method,
-            requestSnapshot,
-            200,
-            truncate(responseBody),
-            false,
-            false,
-            BigDecimal.ZERO,
-            "FREE",
-            "FREE",
-            null,
-            null,
-            0,
-            "密钥未配置IP白名单，已返回自定义内容",
-            attribution
-        );
-        return ResponseEntity
-            .ok()
-            .contentType(bodyContentType(responseBody))
-            .body(responseBody);
     }
 
     private MediaType bodyContentType(String responseBody) {
