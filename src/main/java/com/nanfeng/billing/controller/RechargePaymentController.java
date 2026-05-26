@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.nanfeng.billing.common.ApiResponse;
 import com.nanfeng.billing.common.BusinessException;
 import com.nanfeng.billing.security.SecurityUtils;
+import com.nanfeng.billing.service.PaymentOrderExpirationService;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.net.URI;
@@ -60,6 +61,7 @@ public class RechargePaymentController {
 
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter ORDER_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+    private static final String ALIPAY_TIMEOUT_EXPRESS = PaymentOrderExpirationService.PAYMENT_TIMEOUT_MINUTES + "m";
     private static final String WECHAT_GATEWAY = "https://api.mch.weixin.qq.com";
     private static final ZoneId SYSTEM_ZONE = ZoneId.systemDefault();
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -67,6 +69,7 @@ public class RechargePaymentController {
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final PlatformTransactionManager transactionManager;
+    private final PaymentOrderExpirationService paymentOrderExpirationService;
     private final RestTemplate restTemplate = new RestTemplate();
 
     @GetMapping("/recharge/capabilities")
@@ -124,7 +127,7 @@ public class RechargePaymentController {
         String description = giftAmount.compareTo(BigDecimal.ZERO) > 0
             ? "充值到账户余额，可用于接口调用和套餐购买；本次赠送" + formatAmount(giftAmount) + "元"
             : "充值到账户余额，可用于接口调用和套餐购买";
-        LocalDateTime expireTime = LocalDateTime.now().plusMinutes(30);
+        LocalDateTime expireTime = paymentOrderExpirationService.newExpireTime();
         jdbcTemplate.update("""
             insert into sys_payment_recharge_order(
                 order_no, user_id, amount, gift_amount, pay_product, alipay_method, status,
@@ -180,7 +183,7 @@ public class RechargePaymentController {
         String description = giftAmount.compareTo(BigDecimal.ZERO) > 0
             ? "充值到账户余额，可用于接口调用和套餐购买；本次赠送" + formatAmount(giftAmount) + "元"
             : "充值到账户余额，可用于接口调用和套餐购买";
-        LocalDateTime expireTime = LocalDateTime.now().plusMinutes(30);
+        LocalDateTime expireTime = paymentOrderExpirationService.newExpireTime();
         jdbcTemplate.update("""
             insert into sys_payment_recharge_order(
                 order_no, user_id, amount, gift_amount, pay_channel, pay_product, alipay_method, status,
@@ -197,7 +200,7 @@ public class RechargePaymentController {
             clientType,
             expireTime
         );
-        String qrCode = createWechatNativeCodeUrl(config, orderNo, amount, subject, description);
+        String qrCode = createWechatNativeCodeUrl(config, orderNo, amount, subject, description, expireTime);
         jdbcTemplate.update("""
             update sys_payment_recharge_order
             set qr_code = ?
@@ -304,6 +307,7 @@ public class RechargePaymentController {
     @GetMapping("/recharge/orders/{orderNo}")
     public ApiResponse<Map<String, Object>> rechargeOrder(@PathVariable String orderNo) {
         Long userId = SecurityUtils.currentUser().id();
+        paymentOrderExpirationService.closeExpiredPendingOrder(orderNo);
         return ApiResponse.ok(orderStatusPayload(requiredUserOrder(orderNo, userId)));
     }
 
@@ -314,11 +318,20 @@ public class RechargePaymentController {
         if ("PAID".equals(stringValue(order.get("status"), ""))) {
             return ApiResponse.ok(orderStatusPayload(order));
         }
-        String payChannel = stringValue(order.get("payChannel"), "ALIPAY");
-        if ("WECHAT".equals(payChannel)) {
-            queryWechatAndSettle(enabledWechatConfig(), orderNo);
-        } else if ("ALIPAY".equals(payChannel)) {
-            queryAndSettle(enabledConfig(), orderNo);
+        if ("PENDING".equals(stringValue(order.get("status"), ""))) {
+            try {
+                String payChannel = stringValue(order.get("payChannel"), "ALIPAY");
+                if ("WECHAT".equals(payChannel)) {
+                    queryWechatAndSettle(enabledWechatConfig(), orderNo);
+                } else if ("ALIPAY".equals(payChannel)) {
+                    queryAndSettle(enabledConfig(), orderNo);
+                }
+            } catch (RuntimeException ex) {
+                if (!paymentOrderExpirationService.closeExpiredPendingOrder(orderNo)) {
+                    throw ex;
+                }
+            }
+            paymentOrderExpirationService.closeExpiredPendingOrder(orderNo);
         }
         return ApiResponse.ok(orderStatusPayload(requiredUserOrder(orderNo, userId)));
     }
@@ -440,6 +453,14 @@ public class RechargePaymentController {
                     response.path("send_pay_date").asText(null),
                     responseBody
                 );
+            } else if ("TRADE_CLOSED".equals(tradeStatus)) {
+                jdbcTemplate.update("""
+                    update sys_payment_recharge_order
+                    set status = 'CLOSED',
+                        notify_payload = ?
+                    where order_no = ?
+                      and status = 'PENDING'
+                    """, responseBody, orderNo);
             }
         } catch (JsonProcessingException ex) {
             throw new BusinessException(HttpStatus.BAD_GATEWAY, "支付宝订单查询响应解析失败");
@@ -507,7 +528,7 @@ public class RechargePaymentController {
         String preferredProduct = stringValue(body == null ? null : body.get("preferredProduct"), "AUTO").toUpperCase();
         PayProduct product = selectProduct(config, clientType, preferredProduct);
         String orderNo = nextPackageOrderNo(userId);
-        LocalDateTime expireTime = LocalDateTime.now().plusMinutes(30);
+        LocalDateTime expireTime = paymentOrderExpirationService.newExpireTime();
         jdbcTemplate.update("""
             insert into sys_payment_recharge_order(
                 order_no, user_id, order_type, biz_id, biz_name, amount,
@@ -560,7 +581,7 @@ public class RechargePaymentController {
         WechatConfig config = enabledWechatConfig();
         String clientType = normalizeClientType(body == null ? null : body.get("clientType"));
         String orderNo = nextPackageOrderNo(userId);
-        LocalDateTime expireTime = LocalDateTime.now().plusMinutes(30);
+        LocalDateTime expireTime = paymentOrderExpirationService.newExpireTime();
         jdbcTemplate.update("""
             insert into sys_payment_recharge_order(
                 order_no, user_id, order_type, biz_id, biz_name, amount,
@@ -580,7 +601,7 @@ public class RechargePaymentController {
             clientType,
             expireTime
         );
-        String qrCode = createWechatNativeCodeUrl(config, orderNo, amount, subject, description);
+        String qrCode = createWechatNativeCodeUrl(config, orderNo, amount, subject, description, expireTime);
         jdbcTemplate.update("""
             update sys_payment_recharge_order
             set qr_code = ?
@@ -675,7 +696,7 @@ public class RechargePaymentController {
         bizContent.put("total_amount", formatAmount(amount));
         bizContent.put("subject", subject);
         bizContent.put("body", description);
-        bizContent.put("timeout_express", "30m");
+        bizContent.put("timeout_express", ALIPAY_TIMEOUT_EXPRESS);
         bizContent.put("product_code", product == PayProduct.WAP ? "QUICK_WAP_WAY" : "FAST_INSTANT_TRADE_PAY");
         if (product == PayProduct.WAP) {
             bizContent.put("quit_url", config.returnUrl());
@@ -695,7 +716,7 @@ public class RechargePaymentController {
         bizContent.put("total_amount", formatAmount(amount));
         bizContent.put("subject", subject);
         bizContent.put("body", description);
-        bizContent.put("timeout_express", "30m");
+        bizContent.put("timeout_express", ALIPAY_TIMEOUT_EXPRESS);
         return signedCommonParams(config, PayProduct.FACE.method(), bizContent, false);
     }
 
@@ -751,7 +772,8 @@ public class RechargePaymentController {
         String orderNo,
         BigDecimal amount,
         String subject,
-        String description
+        String description,
+        LocalDateTime expireTime
     ) {
         try {
             Map<String, Object> payload = new LinkedHashMap<>();
@@ -759,6 +781,7 @@ public class RechargePaymentController {
             payload.put("mchid", config.mchId());
             payload.put("description", trimWechatDescription(subject, description));
             payload.put("out_trade_no", orderNo);
+            payload.put("time_expire", expireTime.atZone(SYSTEM_ZONE).format(DateTimeFormatter.ISO_OFFSET_DATE_TIME));
             payload.put("notify_url", config.notifyUrl());
             Map<String, Object> amountPayload = new LinkedHashMap<>();
             amountPayload.put("total", amount.movePointRight(2).setScale(0, RoundingMode.HALF_UP).intValueExact());
@@ -926,7 +949,8 @@ public class RechargePaymentController {
                        biz_id as bizId,
                        amount,
                        gift_amount as giftAmount,
-                       status
+                       status,
+                       expire_time as expireTime
                 from sys_payment_recharge_order
                 where order_no = ?
                 for update
@@ -935,7 +959,26 @@ public class RechargePaymentController {
                 throw new BusinessException(HttpStatus.NOT_FOUND, "充值订单不存在");
             }
             Map<String, Object> order = rows.get(0);
-            if ("PAID".equals(stringValue(order.get("status"), ""))) {
+            String currentStatus = stringValue(order.get("status"), "");
+            if ("PAID".equals(currentStatus)) {
+                return false;
+            }
+            LocalDateTime paidDateTime = parsePaidTime(paidTime);
+            LocalDateTime expireTime = localDateTimeValue(order.get("expireTime"));
+            if (expireTime != null && paidDateTime.isAfter(expireTime)) {
+                jdbcTemplate.update("""
+                    update sys_payment_recharge_order
+                    set status = 'CLOSED',
+                        notify_payload = ?
+                    where order_no = ?
+                      and status = 'PENDING'
+                    """, payload, orderNo);
+                return false;
+            }
+            boolean validDelayedPayment = "CLOSED".equals(currentStatus)
+                && expireTime != null
+                && !paidDateTime.isAfter(expireTime);
+            if (!"PENDING".equals(currentStatus) && !validDelayedPayment) {
                 return false;
             }
             BigDecimal orderAmount = decimalValue(order.get("amount"));
@@ -943,7 +986,6 @@ public class RechargePaymentController {
             if (orderAmount.setScale(2, RoundingMode.HALF_UP).compareTo(paidAmount.setScale(2, RoundingMode.HALF_UP)) != 0) {
                 throw new BusinessException(HttpStatus.BAD_REQUEST, "实付金额与订单金额不一致");
             }
-            LocalDateTime paidDateTime = parsePaidTime(paidTime);
             jdbcTemplate.update("""
                 update sys_payment_recharge_order
                 set status = 'PAID',

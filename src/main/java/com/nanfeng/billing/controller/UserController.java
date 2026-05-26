@@ -6,6 +6,7 @@ import com.nanfeng.billing.model.UserInfoResult;
 import com.nanfeng.billing.security.SecurityUtils;
 import com.nanfeng.billing.service.AuthService;
 import com.nanfeng.billing.service.IpAttributionService;
+import com.nanfeng.billing.service.PaymentOrderExpirationService;
 import com.nanfeng.billing.service.RegisterEmailService;
 import com.nanfeng.billing.service.RegisterMobileService;
 import com.nanfeng.billing.service.RegisterRateLimitService;
@@ -50,6 +51,7 @@ public class UserController {
     private final RegisterRateLimitService registerRateLimitService;
     private final IpAttributionService ipAttributionService;
     private final StringRedisTemplate stringRedisTemplate;
+    private final PaymentOrderExpirationService paymentOrderExpirationService;
 
     @GetMapping("/info")
     public ApiResponse<UserInfoResult> info() {
@@ -259,6 +261,7 @@ public class UserController {
     @GetMapping("/workbench/admin-stats")
     public ApiResponse<Map<String, Object>> adminWorkbenchStats() {
         assertAdmin();
+        paymentOrderExpirationService.closeExpiredPendingOrders();
 
         long todayCalls = countSql("""
             select count(*)

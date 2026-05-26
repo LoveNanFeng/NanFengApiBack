@@ -4,6 +4,7 @@ import com.nanfeng.billing.common.ApiResponse;
 import com.nanfeng.billing.common.BusinessException;
 import com.nanfeng.billing.model.PageResult;
 import com.nanfeng.billing.security.SecurityUtils;
+import com.nanfeng.billing.service.PaymentOrderExpirationService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class PaymentOrderController {
 
     private final JdbcTemplate jdbcTemplate;
+    private final PaymentOrderExpirationService paymentOrderExpirationService;
 
     @GetMapping("/system/payment/orders/list")
     public ApiResponse<PageResult<Map<String, Object>>> adminOrders(
@@ -66,6 +68,7 @@ public class PaymentOrderController {
         String status,
         Long userId
     ) {
+        paymentOrderExpirationService.closeExpiredPendingOrders();
         int safePageSize = Math.max(1, Math.min(pageSize, 100));
         int offset = Math.max(page - 1, 0) * safePageSize;
         StringBuilder where = new StringBuilder(" where 1 = 1\n");
