@@ -1,15 +1,6 @@
 # NanFengAPI 后端
 
-> **项目仓库地址**
->
-> 主仓库：[LoveNanFeng/NanFengAPI](https://github.com/LoveNanFeng/NanFengAPI)
->
-> 前端仓库：[LoveNanFeng/NanFengApiFront](https://github.com/LoveNanFeng/NanFengApiFront)
->
-> 后端仓库：[LoveNanFeng/NanFengApiBack](https://github.com/LoveNanFeng/NanFengApiBack)
->
 > **重要：数据库 SQL 文件路径**
->
 > `src/main/resources/db/schema.sql`
 >
 > 首次部署请先导入该 SQL 文件，再启动后端服务。
