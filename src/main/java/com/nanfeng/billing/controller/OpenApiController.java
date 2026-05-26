@@ -12,30 +12,26 @@ import com.nanfeng.billing.service.InterfaceForwardService.ForwardException;
 import com.nanfeng.billing.service.InterfaceForwardService.ForwardResult;
 import com.nanfeng.billing.service.InterfaceBillingRuleService;
 import com.nanfeng.billing.service.InterfaceBillingRuleService.BillingDecision;
+import com.nanfeng.billing.service.OpenApiBillingService;
+import com.nanfeng.billing.service.OpenApiBillingService.BillingTask;
+import com.nanfeng.billing.service.OpenApiBillingService.CallReservation;
 import com.nanfeng.billing.service.OpenApiConfigCacheService;
-import com.nanfeng.billing.service.OpenApiQuotaService;
-import com.nanfeng.billing.service.OpenApiQuotaService.PackageReservation;
 import jakarta.servlet.http.HttpServletRequest;
 import java.math.BigDecimal;
 import java.net.InetAddress;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -49,18 +45,13 @@ public class OpenApiController {
 
     private static final int MAX_LOG_RESPONSE_BODY_LENGTH = 20_000;
 
-    private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final InterfaceBillingRuleService billingRuleService;
     private final IpAttributionService ipAttributionService;
     private final InterfaceForwardService forwardService;
     private final InterfaceCallLogService callLogService;
     private final OpenApiConfigCacheService openApiConfigCacheService;
-    private final OpenApiQuotaService quotaService;
-    private final HttpClient httpClient = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(10))
-        .followRedirects(HttpClient.Redirect.NORMAL)
-        .build();
+    private final OpenApiBillingService openApiBillingService;
 
     @RequestMapping(value = "/{apiCode}", method = {RequestMethod.GET, RequestMethod.POST})
     public ResponseEntity<String> invoke(
@@ -118,7 +109,12 @@ public class OpenApiController {
         Long interfaceId = ((Number) api.get("id")).longValue();
         BigDecimal balancePrice = new BigDecimal(String.valueOf(api.get("price")));
         long pointPrice = longValue(api.get("pointPrice"));
-        CallReservation reservation = reserveCallableBeforeForward(userId, interfaceId, balancePrice, pointPrice);
+        CallReservation reservation = openApiBillingService.reserveCallableBeforeForward(
+            userId,
+            interfaceId,
+            balancePrice,
+            pointPrice
+        );
 
         try {
             ForwardResult forwardResult = forwardService.forward(api, queryParams, forwardMethod, body);
@@ -128,45 +124,9 @@ public class OpenApiController {
             String responseBody = response.body() == null ? "" : response.body();
             BillingDecision billingDecision = billingRuleService.evaluate(interfaceId, response.statusCode(), responseBody);
             boolean success = billingDecision.billable();
-            BigDecimal chargeAmount = success
-                ? balancePrice
-                : BigDecimal.ZERO;
             String failureReason = failureReason(success, httpSuccess, responseBody);
-            ChargeResult chargeResult;
-            try {
-                chargeResult = chargeForCall(
-                    userId,
-                    interfaceId,
-                    success,
-                    chargeAmount,
-                    pointPrice,
-                    reservation
-                );
-            } catch (BusinessException ex) {
-                logCall(
-                    userId,
-                    interfaceId,
-                    method,
-                    requestSnapshot,
-                    response.statusCode(),
-                    truncate(responseBody),
-                    false,
-                    success,
-                    BigDecimal.ZERO,
-                    "FREE",
-                    "FREE",
-                    null,
-                    billingDecision.ruleSnapshot(),
-                    elapsed,
-                    truncateError(ex.getMessage()),
-                    attribution,
-                    forwardResult.upstreamUrl(),
-                    forwardResult.switched(),
-                    forwardResult.pollingMode()
-                );
-                throw ex;
-            }
-            logCall(
+            finishBillingAsync(new BillingTask(
+                UUID.randomUUID().toString(),
                 userId,
                 interfaceId,
                 method,
@@ -175,10 +135,9 @@ public class OpenApiController {
                 truncate(responseBody),
                 success,
                 success,
-                chargeResult.amount(),
-                chargeResult.type(),
-                chargeResult.scope(),
-                chargeResult.packageId(),
+                success ? balancePrice : BigDecimal.ZERO,
+                pointPrice,
+                reservation,
                 billingDecision.ruleSnapshot(),
                 elapsed,
                 failureReason,
@@ -186,7 +145,7 @@ public class OpenApiController {
                 forwardResult.upstreamUrl(),
                 forwardResult.switched(),
                 forwardResult.pollingMode()
-            );
+            ));
             if (!httpSuccess && !success) {
                 throw new BusinessException(HttpStatus.BAD_GATEWAY, "接口调用失败，请稍后重试");
             }
@@ -196,18 +155,19 @@ public class OpenApiController {
                 .contentType(responseContentType(response))
                 .body(responseBody);
         } catch (InterruptedException ex) {
-            releaseReservation(reservation);
+            String releaseError = openApiBillingService.releaseReservationQuietly(reservation);
             Thread.currentThread().interrupt();
             long elapsed = System.currentTimeMillis() - startedAt;
-            logCall(userId, interfaceId, method, requestSnapshot, 0, "", false, false, BigDecimal.ZERO, "FREE", "FREE", null, null, elapsed, "接口调用被中断", attribution);
+            logCall(userId, interfaceId, method, requestSnapshot, 0, "", false, false, BigDecimal.ZERO,
+                "FREE", "FREE", null, null, elapsed, joinError("接口调用被中断", releaseError), attribution);
             throw new BusinessException(HttpStatus.BAD_GATEWAY, "接口调用被中断");
         } catch (IllegalArgumentException ex) {
-            releaseReservation(reservation);
+            openApiBillingService.releaseReservationQuietly(reservation);
             throw new BusinessException(HttpStatus.BAD_GATEWAY, "接口配置异常，请联系管理员");
         } catch (BusinessException ex) {
             throw ex;
         } catch (ForwardException ex) {
-            releaseReservation(reservation);
+            String releaseError = openApiBillingService.releaseReservationQuietly(reservation);
             long elapsed = System.currentTimeMillis() - startedAt;
             logCall(
                 userId,
@@ -224,7 +184,7 @@ public class OpenApiController {
                 null,
                 null,
                 elapsed,
-                truncateError(ex.getMessage()),
+                joinError(truncateError(ex.getMessage()), releaseError),
                 attribution,
                 ex.upstreamUrl(),
                 ex.switched(),
@@ -232,9 +192,11 @@ public class OpenApiController {
             );
             throw new BusinessException(HttpStatus.BAD_GATEWAY, truncateError(ex.getMessage()));
         } catch (Exception ex) {
-            releaseReservation(reservation);
+            String releaseError = openApiBillingService.releaseReservationQuietly(reservation);
             long elapsed = System.currentTimeMillis() - startedAt;
-            logCall(userId, interfaceId, method, requestSnapshot, 0, "", false, false, BigDecimal.ZERO, "FREE", "FREE", null, null, elapsed, truncateError(ex.getMessage()), attribution);
+            logCall(userId, interfaceId, method, requestSnapshot, 0, "", false, false, BigDecimal.ZERO,
+                "FREE", "FREE", null, null, elapsed, joinError(truncateError(ex.getMessage()), releaseError),
+                attribution);
             throw new BusinessException(HttpStatus.BAD_GATEWAY, "接口调用失败，请稍后重试");
         }
     }
@@ -290,45 +252,12 @@ public class OpenApiController {
         boolean billable = intValue(api.get("specified_response_billable")) == 1;
         CallReservation reservation = CallReservation.none();
         if (billable) {
-            reservation = reserveCallableBeforeForward(userId, interfaceId, balancePrice, pointPrice);
+            reservation = openApiBillingService.reserveCallableBeforeForward(userId, interfaceId, balancePrice, pointPrice);
         }
         String responseBody = specifiedResponseBody(api.get("specified_response_body"));
         long elapsed = System.currentTimeMillis() - startedAt;
-        ChargeResult chargeResult;
-        try {
-            chargeResult = chargeForCall(
-                userId,
-                interfaceId,
-                billable,
-                billable ? balancePrice : BigDecimal.ZERO,
-                pointPrice,
-                reservation
-            );
-        } catch (BusinessException ex) {
-            logCall(
-                userId,
-                interfaceId,
-                method,
-                requestSnapshot,
-                200,
-                truncate(responseBody),
-                false,
-                billable,
-                BigDecimal.ZERO,
-                "FREE",
-                "FREE",
-                null,
-                null,
-                elapsed,
-                truncateError(ex.getMessage()),
-                attribution,
-                "",
-                false,
-                "SPECIFIED"
-            );
-            throw ex;
-        }
-        logCall(
+        finishBillingAsync(new BillingTask(
+            UUID.randomUUID().toString(),
             userId,
             interfaceId,
             method,
@@ -337,10 +266,9 @@ public class OpenApiController {
             truncate(responseBody),
             true,
             billable,
-            chargeResult.amount(),
-            chargeResult.type(),
-            chargeResult.scope(),
-            chargeResult.packageId(),
+            billable ? balancePrice : BigDecimal.ZERO,
+            pointPrice,
+            reservation,
             null,
             elapsed,
             billable ? "用户指定返回，已正常计费" : "用户指定返回，未计费",
@@ -348,7 +276,7 @@ public class OpenApiController {
             "",
             false,
             "SPECIFIED"
-        );
+        ));
         return ResponseEntity
             .ok()
             .contentType(bodyContentType(responseBody))
@@ -478,32 +406,6 @@ public class OpenApiController {
         }
     }
 
-    private int defaultQpsLimitForUser(Long userId) {
-        if (isAdminUser(userId)) {
-            return 0;
-        }
-        Integer qps = jdbcTemplate.queryForObject("""
-            select default_user_qps
-            from sys_register_config
-            where id = 1
-            """, Integer.class);
-        if (qps == null || qps < 1) {
-            return 1;
-        }
-        return qps;
-    }
-
-    private boolean isAdminUser(Long userId) {
-        Long count = jdbcTemplate.queryForObject("""
-            select count(*)
-            from sys_user_role ur
-            inner join sys_role r on r.id = ur.role_id
-            where ur.user_id = ?
-              and r.role_key = 'admin'
-            """, Long.class, userId);
-        return count != null && count > 0;
-    }
-
     private int intValue(Object value) {
         if (value == null) {
             return 0;
@@ -516,258 +418,6 @@ public class OpenApiController {
             return 0;
         }
         return ((Number) value).longValue();
-    }
-
-    private record AccessCandidate(String scope, Long packageId, int dailyLimit, int qpsLimit) {
-    }
-
-    private record CallReservation(PackageReservation packageReservation) {
-        static CallReservation none() {
-            return new CallReservation(null);
-        }
-
-        static CallReservation defaultQps() {
-            return new CallReservation(null);
-        }
-
-        static CallReservation packageQuota(PackageReservation packageReservation) {
-            return new CallReservation(packageReservation);
-        }
-
-        boolean hasPackage() {
-            return packageReservation != null;
-        }
-    }
-
-    private record ChargeResult(String type, String scope, Long packageId, BigDecimal amount) {
-    }
-
-    private CallReservation reserveCallableBeforeForward(
-        Long userId,
-        Long interfaceId,
-        BigDecimal balancePrice,
-        long pointPrice
-    ) {
-        BigDecimal safeBalancePrice = balancePrice == null ? BigDecimal.ZERO : balancePrice;
-        if (safeBalancePrice.compareTo(BigDecimal.ZERO) <= 0) {
-            quotaService.reserveDefaultQps(userId, interfaceId, defaultQpsLimitForUser(userId));
-            return CallReservation.defaultQps();
-        }
-        CallReservation globalReservation = reserveGlobalPackage(userId, interfaceId);
-        if (globalReservation.hasPackage()) {
-            return globalReservation;
-        }
-        CallReservation interfaceReservation = reserveInterfacePackage(userId, interfaceId);
-        if (interfaceReservation.hasPackage()) {
-            return interfaceReservation;
-        }
-
-        quotaService.reserveDefaultQps(userId, interfaceId, defaultQpsLimitForUser(userId));
-        if (pointPrice > 0 && hasEnoughPoints(userId, pointPrice)) {
-            return CallReservation.defaultQps();
-        }
-        if (safeBalancePrice.compareTo(BigDecimal.ZERO) > 0 && hasEnoughBalance(userId, safeBalancePrice)) {
-            return CallReservation.defaultQps();
-        }
-        throw insufficientFunds(pointPrice, safeBalancePrice);
-    }
-
-    private ChargeResult chargeForCall(
-        Long userId,
-        Long interfaceId,
-        boolean billable,
-        BigDecimal balancePrice,
-        long pointPrice,
-        CallReservation reservation
-    ) {
-        BigDecimal safeBalancePrice = balancePrice == null ? BigDecimal.ZERO : balancePrice;
-        if (!billable) {
-            releaseReservation(reservation);
-            return new ChargeResult("FREE", "FREE", null, BigDecimal.ZERO);
-        }
-        if (safeBalancePrice.compareTo(BigDecimal.ZERO) <= 0) {
-            return new ChargeResult("FREE", "FREE", null, BigDecimal.ZERO);
-        }
-
-        if (reservation != null && reservation.hasPackage()) {
-            PackageReservation packageReservation = reservation.packageReservation();
-            return new ChargeResult(
-                "MEMBER",
-                packageReservation.scope(),
-                packageReservation.packageId(),
-                safeBalancePrice
-            );
-        }
-
-        if (pointPrice > 0 && deductPoints(userId, pointPrice)) {
-            return new ChargeResult("POINT", "POINT", null, BigDecimal.valueOf(pointPrice));
-        }
-        if (safeBalancePrice.compareTo(BigDecimal.ZERO) > 0 && deductBalance(userId, safeBalancePrice)) {
-            return new ChargeResult("BALANCE", "BALANCE", null, safeBalancePrice);
-        }
-        if (pointPrice > 0 && safeBalancePrice.compareTo(BigDecimal.ZERO) > 0) {
-            throw insufficientFunds(pointPrice, safeBalancePrice);
-        }
-        if (pointPrice > 0) {
-            throw insufficientFunds(pointPrice, safeBalancePrice);
-        }
-        if (safeBalancePrice.compareTo(BigDecimal.ZERO) > 0) {
-            throw insufficientFunds(pointPrice, safeBalancePrice);
-        }
-        return new ChargeResult("FREE", "FREE", null, BigDecimal.ZERO);
-    }
-
-    private CallReservation reserveGlobalPackage(Long userId, Long interfaceId) {
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-            select up.id as userPackageId,
-                   p.daily_limit as dailyLimit,
-                   p.qps_limit as qpsLimit
-            from sys_user_package_global up
-            inner join sys_package_global p on p.id = up.package_id
-            where up.user_id = ?
-              and up.status = 1
-              and p.status = 1
-              and (up.start_time is null or up.start_time <= now())
-              and (up.expire_time is null or up.expire_time > now())
-            order by case when p.daily_limit = 0 then 1 else 0 end desc,
-                     p.daily_limit desc,
-                     case when p.qps_limit = 0 then 1 else 0 end desc,
-                     p.qps_limit desc,
-                     up.id desc
-            """, userId);
-        return reserveFirstAvailablePackage("GLOBAL", rows, userId, interfaceId);
-    }
-
-    private CallReservation reserveInterfacePackage(Long userId, Long interfaceId) {
-        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
-            select up.id as userPackageId,
-                   s.daily_limit as dailyLimit,
-                   s.qps_limit as qpsLimit
-            from sys_user_package_interface up
-            inner join sys_package_interface p on p.id = up.package_id
-            inner join sys_package_interface_spec s on s.id = up.spec_id
-            where up.user_id = ?
-              and up.interface_id = ?
-              and up.status = 1
-              and p.status = 1
-              and s.status = 1
-              and (up.start_time is null or up.start_time <= now())
-              and (up.expire_time is null or up.expire_time > now())
-            order by case when s.daily_limit = 0 then 1 else 0 end desc,
-                     s.daily_limit desc,
-                     case when s.qps_limit = 0 then 1 else 0 end desc,
-                     s.qps_limit desc,
-                     up.id desc
-            """, userId, interfaceId);
-        return reserveFirstAvailablePackage("INTERFACE", rows, userId, interfaceId);
-    }
-
-    private CallReservation reserveFirstAvailablePackage(
-        String scope,
-        List<Map<String, Object>> rows,
-        Long userId,
-        Long interfaceId
-    ) {
-        for (Map<String, Object> row : rows) {
-            AccessCandidate candidate = new AccessCandidate(
-                scope,
-                longValue(row.get("userPackageId")),
-                intValue(row.get("dailyLimit")),
-                intValue(row.get("qpsLimit"))
-            );
-            PackageReservation reservation = quotaService.tryReservePackage(
-                userId,
-                interfaceId,
-                candidate.scope(),
-                candidate.packageId(),
-                candidate.dailyLimit(),
-                candidate.qpsLimit()
-            );
-            if (reservation.allowed()) {
-                return CallReservation.packageQuota(reservation);
-            }
-        }
-        return CallReservation.none();
-    }
-
-    private void releaseReservation(CallReservation reservation) {
-        if (reservation == null || !reservation.hasPackage()) {
-            return;
-        }
-        quotaService.releaseDailyIfReserved(reservation.packageReservation());
-    }
-
-    private boolean hasEnoughPoints(Long userId, long pointPrice) {
-        Long count = jdbcTemplate.queryForObject("""
-            select count(*)
-            from sys_user
-            where id = ?
-              and status = 1
-              and points >= ?
-            """, Long.class, userId, pointPrice);
-        return count != null && count > 0;
-    }
-
-    private boolean hasEnoughBalance(Long userId, BigDecimal balancePrice) {
-        Long count = jdbcTemplate.queryForObject("""
-            select count(*)
-            from sys_user
-            where id = ?
-              and status = 1
-              and balance >= ?
-            """, Long.class, userId, balancePrice);
-        return count != null && count > 0;
-    }
-
-    private BusinessException insufficientFunds(long pointPrice, BigDecimal balancePrice) {
-        BigDecimal safeBalancePrice = balancePrice == null ? BigDecimal.ZERO : balancePrice;
-        if (pointPrice > 0 && safeBalancePrice.compareTo(BigDecimal.ZERO) > 0) {
-            return new BusinessException(HttpStatus.BAD_REQUEST, "账户点数或余额不足");
-        }
-        if (pointPrice > 0) {
-            return new BusinessException(HttpStatus.BAD_REQUEST, "账户点数不足");
-        }
-        return new BusinessException(HttpStatus.BAD_REQUEST, "账户余额不足");
-    }
-
-    private boolean deductPoints(Long userId, long pointPrice) {
-        int updated = jdbcTemplate.update("""
-            update sys_user
-            set points = points - ?
-            where id = ?
-              and status = 1
-              and points >= ?
-            """, pointPrice, userId, pointPrice);
-        return updated > 0;
-    }
-
-    private boolean deductBalance(Long userId, BigDecimal balancePrice) {
-        int updated = jdbcTemplate.update("""
-            update sys_user
-            set balance = balance - ?
-            where id = ?
-              and status = 1
-              and balance >= ?
-            """, balancePrice, userId, balancePrice);
-        return updated > 0;
-    }
-
-    private HttpRequest buildHttpRequest(URI uri, String method, String body) {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(uri)
-            .timeout(Duration.ofSeconds(30))
-            .header("Accept", "application/json, text/plain, */*")
-            .header("User-Agent", "Nanfeng-Open-Api/1.0");
-        if ("GET".equals(method)) {
-            return builder.GET().build();
-        }
-        String bodyText = body == null ? "" : body.trim();
-        if (bodyText.isBlank()) {
-            return builder.POST(HttpRequest.BodyPublishers.noBody()).build();
-        }
-        return builder
-            .header("Content-Type", "application/json;charset=UTF-8")
-            .POST(HttpRequest.BodyPublishers.ofString(bodyText, StandardCharsets.UTF_8))
-            .build();
     }
 
     private String forwardMethod(String method, String allowedMethod, String body) {
@@ -803,6 +453,26 @@ public class OpenApiController {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "该接口不支持当前请求方式");
         }
         return method;
+    }
+
+    private void finishBillingAsync(BillingTask task) {
+        try {
+            openApiBillingService.finalizeCallAsync(task);
+        } catch (RuntimeException ex) {
+            openApiBillingService.finalizeCall(task);
+        }
+    }
+
+    private String joinError(String original, String append) {
+        String safeOriginal = original == null ? "" : original;
+        String safeAppend = append == null ? "" : append;
+        if (safeOriginal.isBlank()) {
+            return safeAppend;
+        }
+        if (safeAppend.isBlank()) {
+            return safeOriginal;
+        }
+        return safeOriginal + "；" + safeAppend;
     }
 
     private void logCall(

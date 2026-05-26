@@ -22,4 +22,17 @@ public class AsyncConfig {
         executor.initialize();
         return executor;
     }
+
+    @Bean("openApiBillingTaskExecutor")
+    public Executor openApiBillingTaskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setThreadNamePrefix("openapi-billing-");
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(16);
+        executor.setQueueCapacity(10_000);
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(10);
+        executor.initialize();
+        return executor;
+    }
 }
