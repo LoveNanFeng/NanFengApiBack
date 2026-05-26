@@ -8,6 +8,7 @@ import com.nanfeng.billing.security.SecurityUtils;
 import com.nanfeng.billing.util.SecretMasker;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.PrivateKey;
 import java.security.PublicKey;
@@ -37,6 +38,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class PaymentManageController {
 
     private static final String DEFAULT_GATEWAY = "https://openapi.alipay.com/gateway.do";
+    private static final String DEFAULT_WECHAT_GATEWAY = "https://api.mch.weixin.qq.com";
     private static final String DEFAULT_CHARSET = "UTF-8";
     private static final String DEFAULT_FORMAT = "JSON";
     private static final String DEFAULT_SIGN_TYPE = "RSA2";
@@ -132,6 +134,87 @@ public class PaymentManageController {
     public ApiResponse<Boolean> validateAlipayConfig(@RequestBody Map<String, Object> data) {
         assertAdmin();
         validateConfig(parseConfig(data));
+        return ApiResponse.ok(true);
+    }
+
+    @GetMapping("/wechat-config")
+    public ApiResponse<Map<String, Object>> wechatConfig() {
+        assertAdmin();
+        List<Map<String, Object>> configs = jdbcTemplate.queryForList("""
+            select enabled,
+                   app_id as appId,
+                   mch_id as mchId,
+                   api_v3_key as apiV3Key,
+                   merchant_serial_no as merchantSerialNo,
+                   merchant_private_key as merchantPrivateKey,
+                   wechatpay_public_key_id as wechatpayPublicKeyId,
+                   wechatpay_public_key as wechatpayPublicKey,
+                   notify_url as notifyUrl,
+                   native_pay_enabled as nativePayEnabled,
+                   gateway_url as gatewayUrl,
+                   remark,
+                   date_format(update_time, '%Y-%m-%d %H:%i:%s') as updateTime
+            from sys_payment_wechat_config
+            where id = 1
+            """);
+        if (configs.isEmpty()) {
+            return ApiResponse.ok(defaultWechatConfig());
+        }
+        Map<String, Object> config = new LinkedHashMap<>(configs.get(0));
+        config.put("enabled", intValue(config.get("enabled"), 0));
+        config.put("nativePayEnabled", intValue(config.get("nativePayEnabled"), 1));
+        config.put("gatewayUrl", stringValue(config.get("gatewayUrl"), DEFAULT_WECHAT_GATEWAY));
+        config.put("apiV3Key", SecretMasker.mask(trimToNull(config.get("apiV3Key"))));
+        config.put("merchantPrivateKey", SecretMasker.mask(trimToNull(config.get("merchantPrivateKey"))));
+        return ApiResponse.ok(config);
+    }
+
+    @PutMapping("/wechat-config")
+    public ApiResponse<Boolean> updateWechatConfig(@RequestBody Map<String, Object> data) {
+        assertAdmin();
+        WechatConfig config = parseWechatConfig(data);
+        validateWechatConfig(config);
+        jdbcTemplate.update("""
+            insert into sys_payment_wechat_config(
+                id, enabled, app_id, mch_id, api_v3_key, merchant_serial_no,
+                merchant_private_key, wechatpay_public_key_id, wechatpay_public_key,
+                notify_url, native_pay_enabled, gateway_url, remark
+            )
+            values (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            on duplicate key update
+                enabled = values(enabled),
+                app_id = values(app_id),
+                mch_id = values(mch_id),
+                api_v3_key = values(api_v3_key),
+                merchant_serial_no = values(merchant_serial_no),
+                merchant_private_key = values(merchant_private_key),
+                wechatpay_public_key_id = values(wechatpay_public_key_id),
+                wechatpay_public_key = values(wechatpay_public_key),
+                notify_url = values(notify_url),
+                native_pay_enabled = values(native_pay_enabled),
+                gateway_url = values(gateway_url),
+                remark = values(remark)
+            """,
+            config.enabled(),
+            config.appId(),
+            config.mchId(),
+            config.apiV3Key(),
+            config.merchantSerialNo(),
+            config.merchantPrivateKey(),
+            config.wechatpayPublicKeyId(),
+            config.wechatpayPublicKey(),
+            config.notifyUrl(),
+            config.nativePayEnabled(),
+            config.gatewayUrl(),
+            config.remark()
+        );
+        return ApiResponse.ok(true);
+    }
+
+    @PostMapping("/wechat-config/validate")
+    public ApiResponse<Boolean> validateWechatConfig(@RequestBody Map<String, Object> data) {
+        assertAdmin();
+        validateWechatConfig(parseWechatConfig(data));
         return ApiResponse.ok(true);
     }
 
@@ -260,6 +343,24 @@ public class PaymentManageController {
         return config;
     }
 
+    private Map<String, Object> defaultWechatConfig() {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("enabled", 0);
+        config.put("appId", "");
+        config.put("mchId", "");
+        config.put("apiV3Key", "");
+        config.put("merchantSerialNo", "");
+        config.put("merchantPrivateKey", "");
+        config.put("wechatpayPublicKeyId", "");
+        config.put("wechatpayPublicKey", "");
+        config.put("notifyUrl", "");
+        config.put("nativePayEnabled", 1);
+        config.put("gatewayUrl", DEFAULT_WECHAT_GATEWAY);
+        config.put("remark", "");
+        config.put("updateTime", null);
+        return config;
+    }
+
     private AlipayConfig parseConfig(Map<String, Object> data) {
         if (data == null) {
             data = Map.of();
@@ -320,6 +421,55 @@ public class PaymentManageController {
         validatePublicKey(config.alipayPublicKey());
     }
 
+    private WechatConfig parseWechatConfig(Map<String, Object> data) {
+        if (data == null) {
+            data = Map.of();
+        }
+        return new WechatConfig(
+            intValue(data.get("enabled"), 0),
+            trimToNull(data.get("appId")),
+            trimToNull(data.get("mchId")),
+            resolveWechatApiV3Key(trimToNull(data.get("apiV3Key"))),
+            trimToNull(data.get("merchantSerialNo")),
+            resolveWechatMerchantPrivateKey(trimToNull(data.get("merchantPrivateKey"))),
+            trimToNull(data.get("wechatpayPublicKeyId")),
+            trimToNull(data.get("wechatpayPublicKey")),
+            trimToNull(data.get("notifyUrl")),
+            intValue(data.get("nativePayEnabled"), 1),
+            trimToDefault(data.get("gatewayUrl"), DEFAULT_WECHAT_GATEWAY),
+            trimToNull(data.get("remark"))
+        );
+    }
+
+    private void validateWechatConfig(WechatConfig config) {
+        if (config.enabled() != 0 && config.enabled() != 1) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付启用状态不正确");
+        }
+        validateSwitch(config.nativePayEnabled(), "微信 Native 扫码支付");
+        if (!isHttpUrl(config.gatewayUrl())) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付网关地址必须是 HTTP 或 HTTPS 地址");
+        }
+        validateOptionalUrl(config.notifyUrl(), "微信支付异步通知地址");
+        if (config.enabled() == 1) {
+            require(config.appId(), "微信支付 AppID 不能为空");
+            require(config.mchId(), "微信支付商户号不能为空");
+            require(config.apiV3Key(), "微信支付 APIv3 密钥不能为空");
+            require(config.merchantSerialNo(), "微信支付证书序列号不能为空");
+            require(config.merchantPrivateKey(), "微信支付商户私钥不能为空");
+            require(config.notifyUrl(), "微信支付异步通知地址不能为空");
+            if (config.nativePayEnabled() == 0) {
+                throw new BusinessException(HttpStatus.BAD_REQUEST, "请至少启用一种微信支付能力");
+            }
+        }
+        if (config.apiV3Key() != null
+            && !config.apiV3Key().isBlank()
+            && config.apiV3Key().getBytes(StandardCharsets.UTF_8).length != 32) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付 APIv3 密钥必须是 32 字节");
+        }
+        validateWechatPrivateKey(config.merchantPrivateKey());
+        validateWechatPublicKey(config.wechatpayPublicKey());
+    }
+
     private void validateSwitch(int value, String label) {
         if (value != 0 && value != 1) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, label + "开关状态不正确");
@@ -365,6 +515,52 @@ public class PaymentManageController {
             String.class
         );
         return values.isEmpty() ? null : values.get(0);
+    }
+
+    private String resolveWechatApiV3Key(String value) {
+        if (!SecretMasker.isMasked(value)) {
+            return value;
+        }
+        List<String> values = jdbcTemplate.queryForList(
+            "select api_v3_key from sys_payment_wechat_config where id = 1",
+            String.class
+        );
+        return values.isEmpty() ? null : values.get(0);
+    }
+
+    private String resolveWechatMerchantPrivateKey(String value) {
+        if (!SecretMasker.isMasked(value)) {
+            return value;
+        }
+        List<String> values = jdbcTemplate.queryForList(
+            "select merchant_private_key from sys_payment_wechat_config where id = 1",
+            String.class
+        );
+        return values.isEmpty() ? null : values.get(0);
+    }
+
+    private void validateWechatPrivateKey(String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            byte[] bytes = Base64.getDecoder().decode(normalizePem(value));
+            PrivateKey ignored = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(bytes));
+        } catch (Exception ex) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付商户私钥格式不正确，请使用 API 证书中的 PKCS8 RSA 私钥");
+        }
+    }
+
+    private void validateWechatPublicKey(String value) {
+        if (value == null || value.isBlank()) {
+            return;
+        }
+        try {
+            byte[] bytes = Base64.getDecoder().decode(normalizePem(value));
+            PublicKey ignored = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(bytes));
+        } catch (Exception ex) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付平台公钥格式不正确，请粘贴 PEM 或 Base64 X509 公钥");
+        }
     }
 
     private String normalizePem(String value) {
@@ -501,6 +697,22 @@ public class PaymentManageController {
         String signType,
         String charsetName,
         String formatType,
+        String remark
+    ) {
+    }
+
+    private record WechatConfig(
+        int enabled,
+        String appId,
+        String mchId,
+        String apiV3Key,
+        String merchantSerialNo,
+        String merchantPrivateKey,
+        String wechatpayPublicKeyId,
+        String wechatpayPublicKey,
+        String notifyUrl,
+        int nativePayEnabled,
+        String gatewayUrl,
         String remark
     ) {
     }

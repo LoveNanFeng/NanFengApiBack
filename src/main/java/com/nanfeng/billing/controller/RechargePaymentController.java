@@ -8,6 +8,7 @@ import com.nanfeng.billing.common.BusinessException;
 import com.nanfeng.billing.security.SecurityUtils;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -19,6 +20,8 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -28,8 +31,12 @@ import java.util.Map;
 import java.util.TreeMap;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -41,6 +48,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
 
@@ -52,6 +60,8 @@ public class RechargePaymentController {
 
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final DateTimeFormatter ORDER_TIME_FORMATTER = DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+    private static final String WECHAT_GATEWAY = "https://api.mch.weixin.qq.com";
+    private static final ZoneId SYSTEM_ZONE = ZoneId.systemDefault();
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final JdbcTemplate jdbcTemplate;
@@ -62,17 +72,30 @@ public class RechargePaymentController {
     @GetMapping("/recharge/capabilities")
     public ApiResponse<Map<String, Object>> rechargeCapabilities() {
         AlipayConfig config = config(false);
+        WechatConfig wechatConfig = wechatConfig(false);
         Map<String, Object> result = new LinkedHashMap<>();
-        boolean baseEnabled = config.enabled()
+        boolean alipayEnabled = config.enabled()
             && config.appId() != null && !config.appId().isBlank()
             && config.merchantPrivateKey() != null && !config.merchantPrivateKey().isBlank()
             && config.alipayPublicKey() != null && !config.alipayPublicKey().isBlank()
             && config.notifyUrl() != null && !config.notifyUrl().isBlank()
             && (config.websitePayEnabled() || config.wapPayEnabled() || config.facePayEnabled());
-        String desktopDefault = baseEnabled ? safeDefaultProductCode(config, "DESKTOP") : null;
-        String mobileDefault = baseEnabled ? safeDefaultProductCode(config, "MOBILE") : null;
-        boolean enabled = baseEnabled && (desktopDefault != null || mobileDefault != null);
-        result.put("enabled", enabled);
+        String desktopDefault = alipayEnabled ? safeDefaultProductCode(config, "DESKTOP") : null;
+        String mobileDefault = alipayEnabled ? safeDefaultProductCode(config, "MOBILE") : null;
+        alipayEnabled = alipayEnabled && (desktopDefault != null || mobileDefault != null);
+        boolean wechatEnabled = wechatConfig.enabled()
+            && wechatConfig.nativePayEnabled()
+            && wechatConfig.appId() != null && !wechatConfig.appId().isBlank()
+            && wechatConfig.mchId() != null && !wechatConfig.mchId().isBlank()
+            && wechatConfig.apiV3Key() != null && !wechatConfig.apiV3Key().isBlank()
+            && wechatConfig.merchantSerialNo() != null && !wechatConfig.merchantSerialNo().isBlank()
+            && wechatConfig.merchantPrivateKey() != null && !wechatConfig.merchantPrivateKey().isBlank()
+            && wechatConfig.notifyUrl() != null && !wechatConfig.notifyUrl().isBlank();
+        result.put("enabled", alipayEnabled || wechatEnabled);
+        result.put("defaultPayChannel", alipayEnabled ? "ALIPAY" : (wechatEnabled ? "WECHAT" : "ALIPAY"));
+        result.put("alipayEnabled", alipayEnabled);
+        result.put("wechatEnabled", wechatEnabled);
+        result.put("wechatNativePayEnabled", wechatEnabled);
         result.put("websitePayEnabled", config.websitePayEnabled());
         result.put("wapPayEnabled", config.wapPayEnabled());
         result.put("facePayEnabled", config.facePayEnabled());
@@ -85,9 +108,13 @@ public class RechargePaymentController {
     @PostMapping("/recharge/orders")
     public ApiResponse<Map<String, Object>> createRechargeOrder(@RequestBody Map<String, Object> body) {
         Long userId = SecurityUtils.currentUser().id();
-        AlipayConfig config = enabledConfig();
         BigDecimal amount = parseAmount(body == null ? null : body.get("amount"));
         BigDecimal giftAmount = rechargeGiftAmount(amount);
+        String payChannel = normalizeOnlinePayChannel(body == null ? null : body.get("payChannel"));
+        if ("WECHAT".equals(payChannel)) {
+            return ApiResponse.ok(createWechatRechargeOrder(userId, amount, giftAmount, body));
+        }
+        AlipayConfig config = enabledConfig();
         String clientType = normalizeClientType(body == null ? null : body.get("clientType"));
         String preferredProduct = stringValue(body == null ? null : body.get("preferredProduct"), "AUTO").toUpperCase();
         PayProduct product = selectProduct(config, clientType, preferredProduct);
@@ -138,6 +165,45 @@ public class RechargePaymentController {
             null,
             expireTime
         ));
+    }
+
+    private Map<String, Object> createWechatRechargeOrder(
+        Long userId,
+        BigDecimal amount,
+        BigDecimal giftAmount,
+        Map<String, Object> body
+    ) {
+        WechatConfig config = enabledWechatConfig();
+        String clientType = normalizeClientType(body == null ? null : body.get("clientType"));
+        String orderNo = nextOrderNo(userId);
+        String subject = "账户余额充值";
+        String description = giftAmount.compareTo(BigDecimal.ZERO) > 0
+            ? "充值到账户余额，可用于接口调用和套餐购买；本次赠送" + formatAmount(giftAmount) + "元"
+            : "充值到账户余额，可用于接口调用和套餐购买";
+        LocalDateTime expireTime = LocalDateTime.now().plusMinutes(30);
+        jdbcTemplate.update("""
+            insert into sys_payment_recharge_order(
+                order_no, user_id, amount, gift_amount, pay_channel, pay_product, alipay_method, status,
+                subject, body, client_type, expire_time
+            )
+            values (?, ?, ?, ?, 'WECHAT', 'NATIVE', 'wechat.pay.transactions.native', 'PENDING', ?, ?, ?, ?)
+            """,
+            orderNo,
+            userId,
+            amount,
+            giftAmount,
+            subject,
+            description,
+            clientType,
+            expireTime
+        );
+        String qrCode = createWechatNativeCodeUrl(config, orderNo, amount, subject, description);
+        jdbcTemplate.update("""
+            update sys_payment_recharge_order
+            set qr_code = ?
+            where order_no = ?
+            """, qrCode, orderNo);
+        return wechatOrderPayload(orderNo, amount, giftAmount, qrCode, expireTime);
     }
 
     @PostMapping("/package/global/{id}/orders")
@@ -248,8 +314,12 @@ public class RechargePaymentController {
         if ("PAID".equals(stringValue(order.get("status"), ""))) {
             return ApiResponse.ok(orderStatusPayload(order));
         }
-        AlipayConfig config = enabledConfig();
-        queryAndSettle(config, orderNo);
+        String payChannel = stringValue(order.get("payChannel"), "ALIPAY");
+        if ("WECHAT".equals(payChannel)) {
+            queryWechatAndSettle(enabledWechatConfig(), orderNo);
+        } else if ("ALIPAY".equals(payChannel)) {
+            queryAndSettle(enabledConfig(), orderNo);
+        }
         return ApiResponse.ok(orderStatusPayload(requiredUserOrder(orderNo, userId)));
     }
 
@@ -299,6 +369,58 @@ public class RechargePaymentController {
         }
     }
 
+    @PostMapping("/wechat/notify")
+    public Map<String, String> wechatNotify(
+        @RequestBody String body,
+        @RequestHeader Map<String, String> headers
+    ) {
+        try {
+            WechatConfig config = wechatConfig();
+            if (!config.enabled()) {
+                return wechatNotifyResult("FAIL", "微信支付未启用");
+            }
+            if (!verifyWechatNotifySignature(config, body, headers)) {
+                log.warn("WeChat Pay notify signature verification failed");
+                return wechatNotifyResult("FAIL", "签名校验失败");
+            }
+
+            JsonNode transaction = objectMapper.readTree(decryptWechatResource(config, body));
+            if (!config.appId().equals(transaction.path("appid").asText())
+                || !config.mchId().equals(transaction.path("mchid").asText())) {
+                log.warn("WeChat Pay notify appid/mchid mismatch: {}", transaction);
+                return wechatNotifyResult("FAIL", "商户信息不匹配");
+            }
+
+            String orderNo = transaction.path("out_trade_no").asText();
+            String tradeState = transaction.path("trade_state").asText();
+            if (orderNo == null || orderNo.isBlank()) {
+                return wechatNotifyResult("FAIL", "缺少商户订单号");
+            }
+            if ("SUCCESS".equals(tradeState)) {
+                creditPaidOrder(
+                    orderNo,
+                    wechatPaidAmount(transaction.path("amount")),
+                    transaction.path("transaction_id").asText(null),
+                    transaction.path("payer").path("openid").asText(null),
+                    transaction.path("success_time").asText(null),
+                    body
+                );
+            } else if ("CLOSED".equals(tradeState) || "PAYERROR".equals(tradeState)) {
+                jdbcTemplate.update("""
+                    update sys_payment_recharge_order
+                    set status = ?,
+                        notify_payload = ?
+                    where order_no = ?
+                      and status = 'PENDING'
+                    """, "PAYERROR".equals(tradeState) ? "FAILED" : "CLOSED", body, orderNo);
+            }
+            return wechatNotifyResult("SUCCESS", "成功");
+        } catch (Exception ex) {
+            log.warn("Failed to handle WeChat Pay notify", ex);
+            return wechatNotifyResult("FAIL", "处理失败");
+        }
+    }
+
     private void queryAndSettle(AlipayConfig config, String orderNo) {
         Map<String, String> params = buildTradeQueryParams(config, orderNo);
         String responseBody = postToAlipay(config.gatewayUrl(), params);
@@ -324,6 +446,35 @@ public class RechargePaymentController {
         }
     }
 
+    private void queryWechatAndSettle(WechatConfig config, String orderNo) {
+        String path = "/v3/pay/transactions/out-trade-no/" + urlEncode(orderNo) + "?mchid=" + urlEncode(config.mchId());
+        String responseBody = requestWechat(config, "GET", path, "");
+        try {
+            JsonNode response = objectMapper.readTree(responseBody);
+            String tradeState = response.path("trade_state").asText();
+            if ("SUCCESS".equals(tradeState)) {
+                creditPaidOrder(
+                    orderNo,
+                    wechatPaidAmount(response.path("amount")),
+                    response.path("transaction_id").asText(null),
+                    response.path("payer").path("openid").asText(null),
+                    response.path("success_time").asText(null),
+                    responseBody
+                );
+            } else if ("CLOSED".equals(tradeState) || "PAYERROR".equals(tradeState)) {
+                jdbcTemplate.update("""
+                    update sys_payment_recharge_order
+                    set status = ?,
+                        notify_payload = ?
+                    where order_no = ?
+                      and status = 'PENDING'
+                    """, "PAYERROR".equals(tradeState) ? "FAILED" : "CLOSED", responseBody, orderNo);
+            }
+        } catch (JsonProcessingException ex) {
+            throw new BusinessException(HttpStatus.BAD_GATEWAY, "微信支付订单查询响应解析失败");
+        }
+    }
+
     private Map<String, Object> createPackagePaymentOrder(
         Long userId,
         String orderType,
@@ -340,6 +491,9 @@ public class RechargePaymentController {
         String payChannel = stringValue(body == null ? null : body.get("payChannel"), "BALANCE").toUpperCase();
         if ("BALANCE".equals(payChannel)) {
             return payPackageByBalance(userId, orderType, bizId, bizName, amount, subject, description);
+        }
+        if ("WECHAT".equals(payChannel)) {
+            return createWechatPackagePaymentOrder(userId, orderType, bizId, bizName, amount, subject, description, body);
         }
         if (!"ALIPAY".equals(payChannel)) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "不支持的支付方式");
@@ -388,6 +542,51 @@ public class RechargePaymentController {
 
         Map<String, String> payParams = buildTradePayParams(config, product, orderNo, amount, subject, description);
         return orderPayload(orderNo, amount, BigDecimal.ZERO, product, config.gatewayUrl(), payParams, null, expireTime);
+    }
+
+    private Map<String, Object> createWechatPackagePaymentOrder(
+        Long userId,
+        String orderType,
+        Long bizId,
+        String bizName,
+        BigDecimal amount,
+        String subject,
+        String description,
+        Map<String, Object> body
+    ) {
+        if (amount.compareTo(new BigDecimal("0.01")) < 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "0 元套餐请直接免费开通");
+        }
+        WechatConfig config = enabledWechatConfig();
+        String clientType = normalizeClientType(body == null ? null : body.get("clientType"));
+        String orderNo = nextPackageOrderNo(userId);
+        LocalDateTime expireTime = LocalDateTime.now().plusMinutes(30);
+        jdbcTemplate.update("""
+            insert into sys_payment_recharge_order(
+                order_no, user_id, order_type, biz_id, biz_name, amount,
+                pay_channel, pay_product, alipay_method, status,
+                subject, body, client_type, expire_time
+            )
+            values (?, ?, ?, ?, ?, ?, 'WECHAT', 'NATIVE', 'wechat.pay.transactions.native', 'PENDING', ?, ?, ?, ?)
+            """,
+            orderNo,
+            userId,
+            orderType,
+            bizId,
+            bizName,
+            amount,
+            subject,
+            description,
+            clientType,
+            expireTime
+        );
+        String qrCode = createWechatNativeCodeUrl(config, orderNo, amount, subject, description);
+        jdbcTemplate.update("""
+            update sys_payment_recharge_order
+            set qr_code = ?
+            where order_no = ?
+            """, qrCode, orderNo);
+        return wechatOrderPayload(orderNo, amount, BigDecimal.ZERO, qrCode, expireTime);
     }
 
     private Map<String, Object> payPackageByBalance(
@@ -547,6 +746,169 @@ public class RechargePaymentController {
         return responseBody;
     }
 
+    private String createWechatNativeCodeUrl(
+        WechatConfig config,
+        String orderNo,
+        BigDecimal amount,
+        String subject,
+        String description
+    ) {
+        try {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("appid", config.appId());
+            payload.put("mchid", config.mchId());
+            payload.put("description", trimWechatDescription(subject, description));
+            payload.put("out_trade_no", orderNo);
+            payload.put("notify_url", config.notifyUrl());
+            Map<String, Object> amountPayload = new LinkedHashMap<>();
+            amountPayload.put("total", amount.movePointRight(2).setScale(0, RoundingMode.HALF_UP).intValueExact());
+            amountPayload.put("currency", "CNY");
+            payload.put("amount", amountPayload);
+
+            String requestBody = objectMapper.writeValueAsString(payload);
+            String responseBody = requestWechat(config, "POST", "/v3/pay/transactions/native", requestBody);
+            JsonNode response = objectMapper.readTree(responseBody);
+            String codeUrl = response.path("code_url").asText();
+            if (codeUrl == null || codeUrl.isBlank()) {
+                throw new BusinessException(HttpStatus.BAD_GATEWAY, "微信支付未返回扫码链接");
+            }
+            return codeUrl;
+        } catch (JsonProcessingException ex) {
+            throw new BusinessException(HttpStatus.INTERNAL_SERVER_ERROR, "微信支付下单参数生成失败");
+        }
+    }
+
+    private String requestWechat(WechatConfig config, String method, String pathWithQuery, String body) {
+        String requestBody = body == null ? "" : body;
+        HttpHeaders headers = new HttpHeaders();
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+        if (!"GET".equalsIgnoreCase(method)) {
+            headers.setContentType(MediaType.APPLICATION_JSON);
+        }
+        headers.set("Authorization", wechatAuthorization(config, method, pathWithQuery, requestBody));
+        String responseBody = restTemplate.exchange(
+            URI.create(config.gatewayUrl() + pathWithQuery),
+            HttpMethod.valueOf(method),
+            new HttpEntity<>(requestBody, headers),
+            String.class
+        ).getBody();
+        if (responseBody == null || responseBody.isBlank()) {
+            throw new BusinessException(HttpStatus.BAD_GATEWAY, "微信支付接口无响应");
+        }
+        return responseBody;
+    }
+
+    private String wechatAuthorization(WechatConfig config, String method, String pathWithQuery, String body) {
+        String timestamp = String.valueOf(System.currentTimeMillis() / 1000);
+        String nonce = randomNonce();
+        String message = method.toUpperCase() + "\n" + pathWithQuery + "\n" + timestamp + "\n" + nonce + "\n" + body + "\n";
+        String signature = signWechatMessage(message, config.merchantPrivateKey());
+        return "WECHATPAY2-SHA256-RSA2048 "
+            + "mchid=\"" + config.mchId() + "\","
+            + "nonce_str=\"" + nonce + "\","
+            + "timestamp=\"" + timestamp + "\","
+            + "serial_no=\"" + config.merchantSerialNo() + "\","
+            + "signature=\"" + signature + "\"";
+    }
+
+    private String signWechatMessage(String message, String privateKey) {
+        try {
+            Signature signature = Signature.getInstance("SHA256withRSA");
+            byte[] keyBytes = Base64.getDecoder().decode(normalizePem(privateKey));
+            PrivateKey key = KeyFactory.getInstance("RSA").generatePrivate(new PKCS8EncodedKeySpec(keyBytes));
+            signature.initSign(key);
+            signature.update(message.getBytes(StandardCharsets.UTF_8));
+            return Base64.getEncoder().encodeToString(signature.sign());
+        } catch (Exception ex) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付请求签名失败，请检查商户私钥");
+        }
+    }
+
+    private String randomNonce() {
+        byte[] bytes = new byte[16];
+        RANDOM.nextBytes(bytes);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+    }
+
+    private String trimWechatDescription(String subject, String description) {
+        String text = subject == null || subject.isBlank() ? description : subject;
+        if (text == null || text.isBlank()) {
+            text = "NanFengAPI订单";
+        }
+        return text.length() > 127 ? text.substring(0, 127) : text;
+    }
+
+    private boolean verifyWechatNotifySignature(
+        WechatConfig config,
+        String body,
+        Map<String, String> headers
+    ) {
+        if (config.wechatpayPublicKey() == null || config.wechatpayPublicKey().isBlank()) {
+            return true;
+        }
+        String timestamp = headerValue(headers, "Wechatpay-Timestamp");
+        String nonce = headerValue(headers, "Wechatpay-Nonce");
+        String signatureValue = headerValue(headers, "Wechatpay-Signature");
+        String serial = headerValue(headers, "Wechatpay-Serial");
+        if (timestamp == null || nonce == null || signatureValue == null) {
+            return false;
+        }
+        if (config.wechatpayPublicKeyId() != null
+            && !config.wechatpayPublicKeyId().isBlank()
+            && serial != null
+            && !config.wechatpayPublicKeyId().equalsIgnoreCase(serial)) {
+            return false;
+        }
+        try {
+            Signature signature = Signature.getInstance("SHA256withRSA");
+            byte[] keyBytes = Base64.getDecoder().decode(normalizePem(config.wechatpayPublicKey()));
+            PublicKey key = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(keyBytes));
+            signature.initVerify(key);
+            signature.update((timestamp + "\n" + nonce + "\n" + body + "\n").getBytes(StandardCharsets.UTF_8));
+            return signature.verify(Base64.getDecoder().decode(signatureValue));
+        } catch (Exception ex) {
+            log.warn("WeChat Pay notify signature verification threw exception", ex);
+            return false;
+        }
+    }
+
+    private String decryptWechatResource(WechatConfig config, String body) throws Exception {
+        JsonNode resource = objectMapper.readTree(body).path("resource");
+        String algorithm = resource.path("algorithm").asText();
+        if (!"AEAD_AES_256_GCM".equals(algorithm)) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "不支持的微信支付通知加密算法");
+        }
+        String nonce = resource.path("nonce").asText();
+        String associatedData = resource.path("associated_data").asText("");
+        byte[] ciphertext = Base64.getDecoder().decode(resource.path("ciphertext").asText());
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        SecretKeySpec key = new SecretKeySpec(config.apiV3Key().getBytes(StandardCharsets.UTF_8), "AES");
+        cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, nonce.getBytes(StandardCharsets.UTF_8)));
+        if (!associatedData.isBlank()) {
+            cipher.updateAAD(associatedData.getBytes(StandardCharsets.UTF_8));
+        }
+        return new String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8);
+    }
+
+    private Map<String, String> wechatNotifyResult(String code, String message) {
+        Map<String, String> result = new LinkedHashMap<>();
+        result.put("code", code);
+        result.put("message", message);
+        return result;
+    }
+
+    private String headerValue(Map<String, String> headers, String name) {
+        if (headers == null || headers.isEmpty()) {
+            return null;
+        }
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(name)) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
     private boolean creditPaidOrder(
         String orderNo,
         BigDecimal paidAmount,
@@ -579,7 +941,7 @@ public class RechargePaymentController {
             BigDecimal orderAmount = decimalValue(order.get("amount"));
             BigDecimal giftAmount = decimalValue(order.get("giftAmount"));
             if (orderAmount.setScale(2, RoundingMode.HALF_UP).compareTo(paidAmount.setScale(2, RoundingMode.HALF_UP)) != 0) {
-                throw new BusinessException(HttpStatus.BAD_REQUEST, "支付宝实付金额与订单金额不一致");
+                throw new BusinessException(HttpStatus.BAD_REQUEST, "实付金额与订单金额不一致");
             }
             LocalDateTime paidDateTime = parsePaidTime(paidTime);
             jdbcTemplate.update("""
@@ -844,8 +1206,20 @@ public class RechargePaymentController {
         try {
             return LocalDateTime.parse(paidTime, TIME_FORMATTER);
         } catch (Exception ignored) {
-            return LocalDateTime.now();
+            try {
+                return OffsetDateTime.parse(paidTime).atZoneSameInstant(SYSTEM_ZONE).toLocalDateTime();
+            } catch (Exception ignoredAgain) {
+                return LocalDateTime.now();
+            }
         }
+    }
+
+    private BigDecimal wechatPaidAmount(JsonNode amountNode) {
+        int total = amountNode.path("total").asInt(-1);
+        if (total < 0) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付通知缺少支付金额");
+        }
+        return BigDecimal.valueOf(total).movePointLeft(2).setScale(2, RoundingMode.HALF_UP);
     }
 
     private AlipayConfig enabledConfig() {
@@ -864,8 +1238,25 @@ public class RechargePaymentController {
         return config;
     }
 
+    private WechatConfig enabledWechatConfig() {
+        WechatConfig config;
+        try {
+            config = wechatConfig(true);
+        } catch (BusinessException ex) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付功能未开启，请联系管理员");
+        }
+        if (!config.enabled() || !config.nativePayEnabled()) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付功能未开启，请联系管理员");
+        }
+        return config;
+    }
+
     private AlipayConfig config() {
         return config(true);
+    }
+
+    private WechatConfig wechatConfig() {
+        return wechatConfig(true);
     }
 
     private AlipayConfig config(boolean strict) {
@@ -910,6 +1301,44 @@ public class RechargePaymentController {
         );
     }
 
+    private WechatConfig wechatConfig(boolean strict) {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+            select enabled,
+                   app_id as appId,
+                   mch_id as mchId,
+                   api_v3_key as apiV3Key,
+                   merchant_serial_no as merchantSerialNo,
+                   merchant_private_key as merchantPrivateKey,
+                   wechatpay_public_key_id as wechatpayPublicKeyId,
+                   wechatpay_public_key as wechatpayPublicKey,
+                   notify_url as notifyUrl,
+                   native_pay_enabled as nativePayEnabled,
+                   gateway_url as gatewayUrl
+            from sys_payment_wechat_config
+            where id = 1
+            """);
+        if (rows.isEmpty()) {
+            if (strict) {
+                throw new BusinessException(HttpStatus.BAD_REQUEST, "微信支付功能未开启，请联系管理员");
+            }
+            return emptyWechatConfig();
+        }
+        Map<String, Object> row = rows.get(0);
+        return new WechatConfig(
+            intValue(row.get("enabled")) == 1,
+            requiredConfigText(row.get("appId"), "微信支付 AppID 未配置", strict),
+            requiredConfigText(row.get("mchId"), "微信支付商户号未配置", strict),
+            requiredConfigText(row.get("apiV3Key"), "微信支付 APIv3 密钥未配置", strict),
+            requiredConfigText(row.get("merchantSerialNo"), "微信支付证书序列号未配置", strict),
+            requiredConfigText(row.get("merchantPrivateKey"), "微信支付商户私钥未配置", strict),
+            stringValue(row.get("wechatpayPublicKeyId"), ""),
+            stringValue(row.get("wechatpayPublicKey"), ""),
+            requiredConfigText(row.get("notifyUrl"), "微信支付异步通知地址未配置", strict),
+            intValue(row.get("nativePayEnabled")) == 1,
+            stringValue(row.get("gatewayUrl"), WECHAT_GATEWAY)
+        );
+    }
+
     private AlipayConfig emptyAlipayConfig() {
         return new AlipayConfig(
             false,
@@ -925,6 +1354,22 @@ public class RechargePaymentController {
             "RSA2",
             "UTF-8",
             "JSON"
+        );
+    }
+
+    private WechatConfig emptyWechatConfig() {
+        return new WechatConfig(
+            false,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            false,
+            WECHAT_GATEWAY
         );
     }
 
@@ -997,6 +1442,33 @@ public class RechargePaymentController {
         payload.put("formParams", formParams);
         payload.put("paymentUrl", gatewayUrl == null || formParams == null ? null : gatewayUrl + "?" + toQueryString(formParams));
         payload.put("formHtml", gatewayUrl == null || formParams == null ? null : formHtml(gatewayUrl, formParams));
+        payload.put("qrCode", qrCode);
+        payload.put("expireTime", TIME_FORMATTER.format(expireTime));
+        return payload;
+    }
+
+    private Map<String, Object> wechatOrderPayload(
+        String orderNo,
+        BigDecimal amount,
+        BigDecimal giftAmount,
+        String qrCode,
+        LocalDateTime expireTime
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("orderNo", orderNo);
+        payload.put("amount", formatAmount(amount));
+        payload.put("giftAmount", formatAmount(giftAmount == null ? BigDecimal.ZERO : giftAmount));
+        payload.put("creditAmount", formatAmount(amount.add(giftAmount == null ? BigDecimal.ZERO : giftAmount)));
+        payload.put("status", "PENDING");
+        payload.put("payChannel", "WECHAT");
+        payload.put("payProduct", "NATIVE");
+        payload.put("payProductName", "微信扫码支付");
+        payload.put("alipayMethod", "wechat.pay.transactions.native");
+        payload.put("gatewayUrl", null);
+        payload.put("formActionUrl", null);
+        payload.put("formParams", null);
+        payload.put("paymentUrl", null);
+        payload.put("formHtml", null);
         payload.put("qrCode", qrCode);
         payload.put("expireTime", TIME_FORMATTER.format(expireTime));
         return payload;
@@ -1217,6 +1689,14 @@ public class RechargePaymentController {
         return clientType;
     }
 
+    private String normalizeOnlinePayChannel(Object value) {
+        String payChannel = stringValue(value, "ALIPAY").toUpperCase();
+        if (!List.of("ALIPAY", "WECHAT").contains(payChannel)) {
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "不支持的支付方式");
+        }
+        return payChannel;
+    }
+
     private String nextOrderNo(Long userId) {
         return nextOrderNo("RC", userId);
     }
@@ -1323,6 +1803,21 @@ public class RechargePaymentController {
         String signType,
         String charsetName,
         String formatType
+    ) {
+    }
+
+    private record WechatConfig(
+        boolean enabled,
+        String appId,
+        String mchId,
+        String apiV3Key,
+        String merchantSerialNo,
+        String merchantPrivateKey,
+        String wechatpayPublicKeyId,
+        String wechatpayPublicKey,
+        String notifyUrl,
+        boolean nativePayEnabled,
+        String gatewayUrl
     ) {
     }
 
