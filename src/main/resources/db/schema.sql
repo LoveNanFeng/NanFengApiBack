@@ -22,6 +22,9 @@ DROP TABLE IF EXISTS `sys_payment_recharge_order`;
 DROP TABLE IF EXISTS `sys_payment_recharge_amount`;
 DROP TABLE IF EXISTS `sys_payment_wechat_config`;
 DROP TABLE IF EXISTS `sys_payment_alipay_config`;
+DROP TABLE IF EXISTS `sys_redeem_card_log`;
+DROP TABLE IF EXISTS `sys_redeem_card`;
+DROP TABLE IF EXISTS `sys_redeem_card_open_key`;
 DROP TABLE IF EXISTS `sys_user_package_interface`;
 DROP TABLE IF EXISTS `sys_user_package_global`;
 DROP TABLE IF EXISTS `sys_notice`;
@@ -553,6 +556,75 @@ CREATE TABLE `sys_user_package_interface` (
   KEY `idx_user_package_interface_time` (`start_time`, `expire_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='用户接口套餐开通表';
 
+CREATE TABLE `sys_redeem_card` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '卡密编号',
+  `batch_no` varchar(64) NOT NULL COMMENT '生成批次号',
+  `card_code` varchar(64) NOT NULL COMMENT '卡密明文',
+  `card_type` varchar(32) NOT NULL COMMENT '卡密类型：BALANCE余额、GLOBAL_PACKAGE全站套餐、INTERFACE_PACKAGE接口套餐、POINT_PACKAGE点数套餐',
+  `amount` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '余额卡密金额',
+  `point_amount` bigint NOT NULL DEFAULT 0 COMMENT '点数套餐到账点数',
+  `package_scope` varchar(32) DEFAULT NULL COMMENT '套餐范围：GLOBAL全站、INTERFACE接口、POINT点数',
+  `package_id` bigint DEFAULT NULL COMMENT '套餐编号',
+  `spec_id` bigint DEFAULT NULL COMMENT '接口套餐规格编号',
+  `package_name` varchar(255) DEFAULT NULL COMMENT '套餐展示名称',
+  `reward_valid_days` int NOT NULL DEFAULT 0 COMMENT '套餐有效天数快照，生成卡密时写入',
+  `status` tinyint NOT NULL DEFAULT 1 COMMENT '状态：1启用，0禁用',
+  `used` tinyint NOT NULL DEFAULT 0 COMMENT '是否已使用：1已使用，0未使用',
+  `used_user_id` bigint DEFAULT NULL COMMENT '使用用户编号',
+  `used_time` datetime DEFAULT NULL COMMENT '使用时间',
+  `target_user_id` bigint DEFAULT NULL COMMENT '指定可兑换用户编号，空表示不限制',
+  `target_username` varchar(64) DEFAULT NULL COMMENT '指定可兑换用户账号',
+  `expire_time` datetime DEFAULT NULL COMMENT '过期时间，空表示不过期',
+  `remark` varchar(500) DEFAULT NULL COMMENT '备注',
+  `creator_id` bigint DEFAULT NULL COMMENT '创建人编号',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_redeem_card_code` (`card_code`),
+  KEY `idx_sys_redeem_card_batch` (`batch_no`),
+  KEY `idx_sys_redeem_card_type_used` (`card_type`, `used`, `status`),
+  KEY `idx_sys_redeem_card_used_user_time` (`used_user_id`, `used_time`),
+  KEY `idx_sys_redeem_card_target_user` (`target_user_id`, `used`, `status`),
+  KEY `idx_sys_redeem_card_creator_time` (`creator_id`, `create_time`),
+  KEY `idx_sys_redeem_card_expire` (`expire_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='卡密表';
+
+CREATE TABLE `sys_redeem_card_open_key` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '公开接口Key编号',
+  `key_name` varchar(64) NOT NULL COMMENT 'Key名称',
+  `km_key` varchar(64) NOT NULL COMMENT '公开接口调用Key',
+  `card_type` varchar(32) NOT NULL COMMENT '公开类型：GLOBAL、INTERFACE、POINT、BALANCE',
+  `type_code` varchar(32) NOT NULL COMMENT '类型编码：global、interface、point、balance',
+  `amount` decimal(12,4) NOT NULL DEFAULT 0.0000 COMMENT '兼容保留字段，余额金额以公开接口money参数为准',
+  `status` tinyint NOT NULL DEFAULT 1 COMMENT '状态：1启用，0禁用',
+  `creator_id` bigint DEFAULT NULL COMMENT '创建人编号',
+  `last_used_time` datetime DEFAULT NULL COMMENT '最后调用时间',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sys_redeem_card_open_key` (`km_key`),
+  KEY `idx_sys_redeem_card_open_key_type_status` (`card_type`, `status`),
+  KEY `idx_sys_redeem_card_open_key_creator` (`creator_id`, `create_time`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='卡密公开接口Key表';
+
+CREATE TABLE `sys_redeem_card_log` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '日志编号',
+  `card_id` bigint NOT NULL COMMENT '卡密编号',
+  `card_code` varchar(64) NOT NULL COMMENT '卡密明文',
+  `card_type` varchar(32) NOT NULL COMMENT '卡密类型',
+  `reward_summary` varchar(255) NOT NULL COMMENT '兑换奖励摘要',
+  `user_id` bigint NOT NULL COMMENT '使用用户编号',
+  `username` varchar(64) NOT NULL COMMENT '使用用户账号',
+  `real_name` varchar(64) DEFAULT NULL COMMENT '使用用户姓名',
+  `client_ip` varchar(64) DEFAULT NULL COMMENT '兑换来源IP',
+  `create_time` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '兑换时间',
+  PRIMARY KEY (`id`),
+  KEY `idx_sys_redeem_card_log_card` (`card_id`),
+  KEY `idx_sys_redeem_card_log_user_time` (`user_id`, `create_time`),
+  KEY `idx_sys_redeem_card_log_type_time` (`card_type`, `create_time`),
+  KEY `idx_sys_redeem_card_log_code` (`card_code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='卡密兑换日志表';
+
 CREATE TABLE `sys_notice` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '公告编号',
   `title` varchar(100) NOT NULL COMMENT '公告标题',
@@ -678,6 +750,11 @@ VALUES
   (907, 905, 'PaymentAmountEdit', '/payment/amounts/edit', NULL, NULL, 'common.edit', NULL, 'button', 'Payment:Amount:Edit', 22, NULL, NULL, 1, 1),
   (908, 905, 'PaymentAmountDelete', '/payment/amounts/delete', NULL, NULL, 'common.delete', NULL, 'button', 'Payment:Amount:Delete', 23, NULL, NULL, 1, 1),
   (909, 905, 'PaymentAmountStatus', '/payment/amounts/status', NULL, NULL, '状态', NULL, 'button', 'Payment:Amount:Status', 24, NULL, NULL, 1, 1),
+  (1200, 0, 'RedeemCardManagement', '/redeem-card', NULL, '/redeem-card/generate', '卡密管理', 'mdi:ticket-confirmation-outline', 'catalog', NULL, 65, NULL, NULL, NULL, 1),
+  (1201, 1200, 'RedeemCardGenerate', '/redeem-card/generate', '/redeem-card/generate/index', NULL, '生成卡密', 'mdi:ticket-percent-outline', 'menu', 'RedeemCard:Generate', 10, NULL, NULL, NULL, 1),
+  (1202, 1200, 'RedeemCardLog', '/redeem-card/log', '/redeem-card/log/index', NULL, '卡密日志', 'mdi:clipboard-text-clock-outline', 'menu', 'RedeemCard:Log:List', 20, NULL, NULL, NULL, 1),
+  (1203, 1201, 'RedeemCardCreate', '/redeem-card/generate/create', NULL, NULL, 'common.create', NULL, 'button', 'RedeemCard:Create', 11, NULL, NULL, 1, 1),
+  (1204, 1200, 'RedeemCardOpen', '/redeem-card/open', '/redeem-card/open/index', NULL, '公开接口', 'mdi:api', 'menu', 'RedeemCard:Open:List', 30, NULL, NULL, NULL, 1),
   (1000, 0, 'NoticeManagement', '/notice-admin', NULL, '/notice-admin/list', '公告管理', 'mdi:bullhorn-outline', 'catalog', NULL, 60, NULL, NULL, NULL, 1),
   (1001, 1000, 'NoticeAdminList', '/notice-admin/list', '/notice/admin/list', NULL, '公告列表', 'mdi:clipboard-text-outline', 'menu', 'Notice:Admin:List', 10, NULL, NULL, NULL, 1),
   (1002, 1001, 'NoticeCreate', '/notice-admin/list/create', NULL, NULL, 'common.create', NULL, 'button', 'Notice:Admin:Create', 11, NULL, NULL, 1, 1),
@@ -687,6 +764,7 @@ VALUES
   (1006, 1001, 'NoticeTop', '/notice-admin/list/top', NULL, NULL, '置顶', NULL, 'button', 'Notice:Admin:Top', 15, NULL, NULL, 1, 1),
   (1008, 1001, 'NoticePopup', '/notice-admin/list/popup', NULL, NULL, '每日弹窗', NULL, 'button', 'Notice:Admin:Popup', 16, NULL, NULL, 1, 1),
   (1007, 0, 'UserNoticeCenter', '/notice', '/notice/user/list', NULL, '公告列表', 'mdi:bullhorn-outline', 'menu', 'Notice:User:List', 70, NULL, NULL, NULL, 1),
+  (1210, 0, 'UserRedeemCard', '/redeem', '/redeem-card/user/index', NULL, '卡密兑换', 'mdi:ticket-percent-outline', 'menu', 'RedeemCard:User:Redeem', 75, NULL, NULL, NULL, 1),
   (400, 0, 'UserManagement', '/user', NULL, '/user/list', 'system.user.title', 'mdi:account-cog', 'catalog', NULL, 20, NULL, NULL, NULL, 1),
   (401, 400, 'SystemUser', '/user/list', '/system/user/list', NULL, 'system.user.listTitle', 'mdi:account', 'menu', 'System:User:List', 10, NULL, NULL, NULL, 1),
   (402, 401, 'SystemUserCreate', '/user/list/create', NULL, NULL, 'common.create', NULL, 'button', 'System:User:Create', 11, NULL, NULL, 1, 1),
@@ -722,7 +800,7 @@ VALUES
   (301, 0, 'Profile', '/profile', '/_core/profile/index', NULL, 'page.auth.profile', 'lucide:user', 'menu', NULL, 9998, NULL, NULL, 1, 1);
 
 INSERT INTO `sys_role_menu` (`role_id`, `menu_id`)
-SELECT 1, `id` FROM `sys_menu` WHERE `status` = 1 AND `id` NOT IN (506, 509, 600, 601, 602, 603, 604, 605, 800, 801, 802, 803, 804, 805, 1007);
+SELECT 1, `id` FROM `sys_menu` WHERE `status` = 1 AND `id` NOT IN (506, 509, 600, 601, 602, 603, 604, 605, 800, 801, 802, 803, 804, 805, 1007, 1210);
 
 INSERT INTO `sys_role_menu` (`role_id`, `menu_id`)
-SELECT 2, `id` FROM `sys_menu` WHERE `id` IN (102, 301, 505, 506, 509, 600, 601, 602, 603, 604, 605, 800, 801, 802, 803, 804, 805, 1007);
+SELECT 2, `id` FROM `sys_menu` WHERE `id` IN (102, 301, 505, 506, 509, 600, 601, 602, 603, 604, 605, 800, 801, 802, 803, 804, 805, 1007, 1210);
