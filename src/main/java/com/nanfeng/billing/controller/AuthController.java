@@ -172,6 +172,7 @@ public class AuthController {
         HttpServletRequest httpServletRequest
     ) {
         authService.ensureRegisterOpen();
+        assertCaptchaVerified(request == null ? null : request.get("captchaId"), httpServletRequest);
         registerRateLimitService.assertVerificationCodeSendAllowed(
             ipAttributionService.resolveClientIp(httpServletRequest)
         );
@@ -185,6 +186,7 @@ public class AuthController {
         HttpServletRequest httpServletRequest
     ) {
         authService.ensureRegisterOpen();
+        assertCaptchaVerified(request == null ? null : request.get("captchaId"), httpServletRequest);
         registerRateLimitService.assertVerificationCodeSendAllowed(
             ipAttributionService.resolveClientIp(httpServletRequest)
         );
